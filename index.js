@@ -303,26 +303,6 @@ function loadSettingsHTML() {
                 <textarea id="idle_prompts" class="text_pole" rows="6"></textarea>
             </div>
 
-            <div class="idle_block flex-container flexFlowColumn">
-                <span>Response mode (pick one)</span>
-                <label class="checkbox_label" for="idle_use_continuation">
-                    <input id="idle_use_continuation" type="checkbox" />
-                    <span>Continuation</span>
-                </label>
-                <label class="checkbox_label" for="idle_use_regenerate">
-                    <input id="idle_use_regenerate" type="checkbox" />
-                    <span>Regenerate</span>
-                </label>
-                <label class="checkbox_label" for="idle_use_impersonation">
-                    <input id="idle_use_impersonation" type="checkbox" />
-                    <span>Impersonation</span>
-                </label>
-                <label class="checkbox_label" for="idle_use_swipe">
-                    <input id="idle_use_swipe" type="checkbox" />
-                    <span>Swipe</span>
-                </label>
-            </div>
-
 
             <div class="idle_block flex-container">
                 <label class="checkbox_label flex1" for="idle_include_prompt">
