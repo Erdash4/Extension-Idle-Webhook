@@ -152,6 +152,46 @@ async function sendDiscordWebhook(characterName, messageContent) {
 }
 
 /**
+ * Wait for the AI to finish generating, then return the last character message text.
+ * Polls every 500ms until #mes_stop is hidden, then reads the last .mes block.
+ * @param {number} [timeoutMs=60000] - Max time to wait before giving up.
+ * @returns {Promise<string>} The character's response text, or empty string on timeout.
+ */
+function waitForCharacterResponse(timeoutMs = 60000) {
+    return new Promise((resolve) => {
+        const start = Date.now();
+
+        // If generation hasn't started yet, give it a moment to kick off
+        setTimeout(function poll() {
+            const isGenerating = $('#mes_stop').is(':visible');
+
+            if (!isGenerating) {
+                if (Date.now() - start > timeoutMs) {
+                    console.warn('Idle: timed out waiting for character response.');
+                    resolve('');
+                    return;
+                }
+
+                // Generation finished (or never started) — check if we should keep waiting
+                // Give ST up to 300ms to show the stop button before assuming it's done
+                if (Date.now() - start < 300) {
+                    setTimeout(poll, 100);
+                    return;
+                }
+
+                // Read the last character message from the chat
+                const $lastCharMsg = $('.mes[is_user="false"]').last();
+                const text = $lastCharMsg.find('.mes_text').text().trim();
+                resolve(text);
+            } else {
+                // Still generating — keep polling
+                setTimeout(poll, 500);
+            }
+        }, 100);
+    });
+}
+
+/**
  * Send a random idle prompt to the AI based on the extension settings.
  * Checks conditions like if the extension is enabled and repeat conditions.
  */
@@ -160,7 +200,6 @@ async function sendIdlePrompt() {
 
     // Check repeat conditions and waiting for a response
     if (repeatCount >= extension_settings.idle.repeats || $('#mes_stop').is(':visible')) {
-        //console.debug("Not sending idle prompt due to repeat conditions or waiting for a response.");
         resetIdleTimer();
         return;
     }
@@ -169,7 +208,6 @@ async function sendIdlePrompt() {
         Math.floor(Math.random() * extension_settings.idle.prompts.length)
     ];
 
-    // Resolve character name for the webhook before sending
     const context = getContext();
     const characterName = context.name2 || 'Character';
 
@@ -177,10 +215,11 @@ async function sendIdlePrompt() {
     repeatCount++;
     resetIdleTimer();
 
-    // Send Discord notification after dispatching the prompt.
-    // We use the prompt text as the message content since the AI response
-    // isn't available synchronously at this point.
-    await sendDiscordWebhook(characterName, randomPrompt);
+    // Wait for the AI to finish, then send the actual response text to Discord
+    const responseText = await waitForCharacterResponse();
+    if (responseText) {
+        await sendDiscordWebhook(characterName, responseText);
+    }
 }
 
 
@@ -193,7 +232,7 @@ function sendLoud(sendAs, prompt) {
     if (sendAs === 'user') {
         prompt = substituteParams(prompt);
 
-        $('#send_textarea').val(prompt);
+        $('#send_textarea').val(prompt).trigger('input');
 
         // Set the focus back to the textarea
         $('#send_textarea').focus();
