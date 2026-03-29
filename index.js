@@ -307,7 +307,7 @@ function loadSettingsHTML() {
             <div class="idle_block flex-container">
                 <label class="checkbox_label flex1" for="idle_include_prompt">
                     <input id="idle_include_prompt" type="checkbox" />
-                    <span>Include prompt in message</span>
+                    <span>Show idle prompts</span>
                 </label>
             </div>
 
