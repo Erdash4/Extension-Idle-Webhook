@@ -249,7 +249,9 @@ function sendPrompt(prompt) {
 async function loadSettingsHTML() {
     const settingsHtml = await renderExtensionTemplateAsync(extensionName, 'dropdown');
     const getContainer = () => $(document.getElementById('idle_container') ?? document.getElementById('extensions_settings2'));
-    getContainer().append(settingsHtml);
+    const $template = $(settingsHtml);
+    getContainer().append($template);
+    injectDiscordWebhookUI($template);
 }
 
 /**
@@ -528,12 +530,6 @@ function toggleIdle() {
 
 jQuery(async () => {
     await loadSettingsHTML();
-
-    // Inject Discord UI now that the base template is in the DOM,
-    // but BEFORE loadSettings() so populateUIWithSettings() can find the elements.
-    const container = $(document.getElementById('idle_container') ?? document.getElementById('extensions_settings2'));
-    injectDiscordWebhookUI(container);
-
     loadSettings();
     setupListeners();
     if (extension_settings.idle.enabled) {
