@@ -3,7 +3,7 @@ import {
     substituteParams,
 } from '../../../../script.js';
 import { debounce } from '../../../utils.js';
-import { promptQuietForLoudResponse, sendMessageAs, sendNarratorMessage } from '../../../slash-commands.js';
+import { promptQuietForLoudResponse } from '../../../slash-commands.js';
 import { extension_settings, getContext } from '../../../extensions.js';
 import { registerSlashCommand } from '../../../slash-commands.js';
 
@@ -32,7 +32,6 @@ let defaultSettings = {
     useImpersonation: false,
     useSwipe: false,
     repeats: 2, // 0 = infinite
-    sendAs: 'user',
     randomTime: false,
     timeMin: 60,
     includePrompt: false,
@@ -73,7 +72,6 @@ function populateUIWithSettings() {
     $('#idle_use_swipe').prop('checked', extension_settings.idle.useSwipe).trigger('input');
     $('#idle_enabled').prop('checked', extension_settings.idle.enabled).trigger('input');
     $('#idle_repeats').val(extension_settings.idle.repeats).trigger('input');
-    $('#idle_sendAs').val(extension_settings.idle.sendAs).trigger('input');
     $('#idle_random_time').prop('checked', extension_settings.idle.randomTime).trigger('input');
     $('#idle_timer_min').val(extension_settings.idle.timerMin).trigger('input');
     $('#idle_include_prompt').prop('checked', extension_settings.idle.includePrompt).trigger('input');
@@ -153,41 +151,39 @@ async function sendDiscordWebhook(characterName, messageContent) {
 
 /**
  * Wait for the AI to finish generating, then return the last character message text.
- * Polls every 500ms until #mes_stop is hidden, then reads the last .mes block.
+ * First waits for #mes_stop to become visible (generation started),
+ * then waits for it to hide (generation finished), then reads the last char message.
  * @param {number} [timeoutMs=60000] - Max time to wait before giving up.
  * @returns {Promise<string>} The character's response text, or empty string on timeout.
  */
 function waitForCharacterResponse(timeoutMs = 60000) {
     return new Promise((resolve) => {
         const start = Date.now();
+        const elapsed = () => Date.now() - start;
 
-        // If generation hasn't started yet, give it a moment to kick off
-        setTimeout(function poll() {
-            const isGenerating = $('#mes_stop').is(':visible');
+        // Phase 1: wait for generation to START (#mes_stop becomes visible)
+        function waitForStart() {
+            if (elapsed() > timeoutMs) { resolve(''); return; }
+            if ($('#mes_stop').is(':visible')) {
+                waitForEnd();
+            } else {
+                setTimeout(waitForStart, 100);
+            }
+        }
 
-            if (!isGenerating) {
-                if (Date.now() - start > timeoutMs) {
-                    console.warn('Idle: timed out waiting for character response.');
-                    resolve('');
-                    return;
-                }
-
-                // Generation finished (or never started) — check if we should keep waiting
-                // Give ST up to 300ms to show the stop button before assuming it's done
-                if (Date.now() - start < 300) {
-                    setTimeout(poll, 100);
-                    return;
-                }
-
-                // Read the last character message from the chat
-                const $lastCharMsg = $('.mes[is_user="false"]').last();
-                const text = $lastCharMsg.find('.mes_text').text().trim();
+        // Phase 2: wait for generation to END (#mes_stop becomes hidden)
+        function waitForEnd() {
+            if (elapsed() > timeoutMs) { resolve(''); return; }
+            if (!$('#mes_stop').is(':visible')) {
+                // Generation done — read the last character message
+                const text = $('.mes[is_user="false"]').last().find('.mes_text').text().trim();
                 resolve(text);
             } else {
-                // Still generating — keep polling
-                setTimeout(poll, 500);
+                setTimeout(waitForEnd, 300);
             }
-        }, 100);
+        }
+
+        waitForStart();
     });
 }
 
@@ -224,39 +220,13 @@ async function sendIdlePrompt() {
 
 
 /**
- * Add our prompt to the chat and then send the chat to the backend.
- * @param {string} sendAs - The type of message to send. "user", "char", or "sys".
- * @param {string} prompt - The prompt text to send to the AI.
- */
-function sendLoud(sendAs, prompt) {
-    if (sendAs === 'user') {
-        prompt = substituteParams(prompt);
-
-        $('#send_textarea').val(prompt).trigger('input');
-
-        // Set the focus back to the textarea
-        $('#send_textarea').focus();
-
-        $('#send_but').trigger('click');
-    } else if (sendAs === 'char') {
-        sendMessageAs('', `${getContext().name2}\n${prompt}`);
-        promptQuietForLoudResponse(sendAs, '');
-    } else if (sendAs === 'sys') {
-        sendNarratorMessage('', prompt);
-        promptQuietForLoudResponse(sendAs, '');
-    }
-    else {
-        console.error(`Unknown sendAs value: ${sendAs}`);
-    }
-}
-
-/**
- * Send the provided prompt to the AI. Determines method based on continuation setting.
- * @param {string} prompt - The prompt text to send to the AI.
+ * Send the provided prompt to the AI as the user.
+ * If includePrompt is true, puts the text visibly in the chat via the textarea.
+ * If false, sends it silently via promptQuietForLoudResponse.
+ * @param {string} prompt - The prompt text to send.
  */
 function sendPrompt(prompt) {
     clearTimeout(idleTimer);
-    $('#send_textarea').off('input');
 
     if (extension_settings.idle.useRegenerate) {
         $('#option_regenerate').trigger('click');
@@ -270,15 +240,19 @@ function sendPrompt(prompt) {
     } else if (extension_settings.idle.useSwipe) {
         $('.last_mes .swipe_right').click();
         console.debug('Sending idle swipe');
+    } else if (extension_settings.idle.includePrompt) {
+        // Send visibly as the user — set textarea value and click send
+        const text = substituteParams(prompt);
+        const $ta = $('#send_textarea');
+        $ta.val(text);
+        // Dispatch a native input event so ST's internal state syncs
+        $ta[0].dispatchEvent(new Event('input', { bubbles: true }));
+        $('#send_but').trigger('click');
+        console.debug('Sending idle prompt (visible)');
     } else {
-        console.debug('Sending idle prompt');
-        console.log(extension_settings.idle);
-        if (extension_settings.idle.includePrompt) {
-            sendLoud(extension_settings.idle.sendAs, prompt);
-        }
-        else {
-            promptQuietForLoudResponse(extension_settings.idle.sendAs, prompt);
-        }
+        // Send silently
+        promptQuietForLoudResponse('user', prompt);
+        console.debug('Sending idle prompt (silent)');
     }
 }
 
@@ -349,15 +323,6 @@ function loadSettingsHTML() {
                 </label>
             </div>
 
-            <div class="idle_block flex-container flexFlowColumn">
-                <label for="idle_sendAs">Send as</label>
-                <select id="idle_sendAs" class="text_pole">
-                    <option value="user">User</option>
-                    <option value="char">Character</option>
-                    <option value="sys">System</option>
-                    <option value="raw">Raw</option>
-                </select>
-            </div>
 
             <div class="idle_block flex-container">
                 <label class="checkbox_label flex1" for="idle_include_prompt">
@@ -462,7 +427,6 @@ function setupListeners() {
         ['idle_use_swipe', 'useSwipe', true],
         ['idle_enabled', 'enabled', true],
         ['idle_repeats', 'repeats'],
-        ['idle_sendAs', 'sendAs'],
         ['idle_random_time', 'randomTime', true],
         ['idle_timer_min', 'timerMin'],
         ['idle_include_prompt', 'includePrompt', true],
@@ -524,14 +488,7 @@ function setupListeners() {
         $('#idle_timer').trigger('input');
     });
 
-    // if we're including the prompt, hide raw from the sendAs dropdown
-    $('#idle_include_prompt').on('input', function () {
-        if ($(this).prop('checked')) {
-            $('#idle_sendAs option[value="raw"]').hide();
-        } else {
-            $('#idle_sendAs option[value="raw"]').show();
-        }
-    });
+    // if we're including the prompt, show/hide has no sendAs dropdown to worry about anymore
 
     //make sure timer min is less than timer
     $('#idle_timer').on('input', function () {
