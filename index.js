@@ -36,6 +36,9 @@ let defaultSettings = {
     randomTime: false,
     timeMin: 60,
     includePrompt: false,
+    // Discord webhook settings
+    discordWebhookEnabled: false,
+    discordWebhookUrl: '',
 };
 
 
@@ -74,6 +77,9 @@ function populateUIWithSettings() {
     $('#idle_random_time').prop('checked', extension_settings.idle.randomTime).trigger('input');
     $('#idle_timer_min').val(extension_settings.idle.timerMin).trigger('input');
     $('#idle_include_prompt').prop('checked', extension_settings.idle.includePrompt).trigger('input');
+    // Discord webhook UI
+    $('#idle_discord_webhook_enabled').prop('checked', extension_settings.idle.discordWebhookEnabled).trigger('input');
+    $('#idle_discord_webhook_url').val(extension_settings.idle.discordWebhookUrl).trigger('input');
 }
 
 
@@ -100,6 +106,52 @@ function resetIdleTimer() {
 }
 
 /**
+ * Send a Discord webhook notification with the character name and message content.
+ * @param {string} characterName - The name of the character sending the message.
+ * @param {string} messageContent - The content of the idle message.
+ */
+async function sendDiscordWebhook(characterName, messageContent) {
+    if (!extension_settings.idle.discordWebhookEnabled) return;
+
+    const webhookUrl = extension_settings.idle.discordWebhookUrl?.trim();
+    if (!webhookUrl) {
+        console.warn('Discord webhook is enabled but no URL is set.');
+        return;
+    }
+
+    const payload = {
+        username: characterName || 'SillyTavern Idle',
+        content: `💬 **${characterName}** sent an idle message:`,
+        embeds: [
+            {
+                description: messageContent,
+                color: 0x5865F2, // Discord blurple
+                footer: {
+                    text: 'SillyTavern • Idle Extension',
+                },
+                timestamp: new Date().toISOString(),
+            },
+        ],
+    };
+
+    try {
+        const response = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            console.error(`Discord webhook failed: ${response.status} ${response.statusText}`);
+        } else {
+            console.debug('Discord webhook sent successfully.');
+        }
+    } catch (error) {
+        console.error('Error sending Discord webhook:', error);
+    }
+}
+
+/**
  * Send a random idle prompt to the AI based on the extension settings.
  * Checks conditions like if the extension is enabled and repeat conditions.
  */
@@ -117,9 +169,18 @@ async function sendIdlePrompt() {
         Math.floor(Math.random() * extension_settings.idle.prompts.length)
     ];
 
+    // Resolve character name for the webhook before sending
+    const context = getContext();
+    const characterName = context.name2 || 'Character';
+
     sendPrompt(randomPrompt);
     repeatCount++;
     resetIdleTimer();
+
+    // Send Discord notification after dispatching the prompt.
+    // We use the prompt text as the message content since the AI response
+    // isn't available synchronously at this point.
+    await sendDiscordWebhook(characterName, randomPrompt);
 }
 
 
@@ -189,6 +250,60 @@ async function loadSettingsHTML() {
     const settingsHtml = await renderExtensionTemplateAsync(extensionName, 'dropdown');
     const getContainer = () => $(document.getElementById('idle_container') ?? document.getElementById('extensions_settings2'));
     getContainer().append(settingsHtml);
+
+    // Inject Discord webhook UI after the existing settings HTML loads
+    injectDiscordWebhookUI(getContainer());
+}
+
+/**
+ * Inject Discord webhook settings UI into the settings container.
+ * @param {Function|jQuery} container - The container to append into.
+ */
+function injectDiscordWebhookUI(container) {
+    const discordHtml = `
+    <div id="idle_discord_section" style="margin-top: 12px; border-top: 1px solid var(--SmartThemeBorderColor, #555); padding-top: 10px;">
+        <h4 style="margin: 0 0 8px 0; font-size: 0.95em; opacity: 0.85;">
+            <span style="margin-right: 6px;">🔔</span> Discord Webhook Notifications
+        </h4>
+
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+            <input type="checkbox" id="idle_discord_webhook_enabled" />
+            <label for="idle_discord_webhook_enabled" style="margin: 0; cursor: pointer;">
+                Enable Discord notifications for idle messages
+            </label>
+        </div>
+
+        <div id="idle_discord_webhook_url_wrapper" style="display: flex; flex-direction: column; gap: 4px;">
+            <label for="idle_discord_webhook_url" style="font-size: 0.85em; opacity: 0.75;">
+                Webhook URL
+            </label>
+            <input
+                type="text"
+                id="idle_discord_webhook_url"
+                placeholder="https://discord.com/api/webhooks/..."
+                style="width: 100%; box-sizing: border-box; padding: 5px 8px; border-radius: 4px;
+                       border: 1px solid var(--SmartThemeBorderColor, #555);
+                       background: var(--SmartThemeBodyColor, #1e1e1e);
+                       color: var(--SmartThemeBlurTintColor, #eee);
+                       font-size: 0.85em;"
+            />
+            <small style="opacity: 0.55; font-size: 0.78em;">
+                In Discord: channel settings → Integrations → Webhooks → Copy Webhook URL
+            </small>
+        </div>
+
+        <div style="margin-top: 8px;">
+            <button id="idle_discord_test_btn"
+                style="padding: 4px 12px; font-size: 0.82em; cursor: pointer; border-radius: 4px;
+                       border: 1px solid var(--SmartThemeBorderColor, #555);
+                       background: transparent; color: inherit; opacity: 0.8;">
+                Send Test Notification
+            </button>
+            <span id="idle_discord_test_result" style="margin-left: 8px; font-size: 0.82em; opacity: 0.7;"></span>
+        </div>
+    </div>`;
+
+    container().append(discordHtml);
 }
 
 /**
@@ -255,6 +370,9 @@ function setupListeners() {
         ['idle_random_time', 'randomTime', true],
         ['idle_timer_min', 'timerMin'],
         ['idle_include_prompt', 'includePrompt', true],
+        // Discord webhook settings
+        ['idle_discord_webhook_enabled', 'discordWebhookEnabled', true],
+        ['idle_discord_webhook_url', 'discordWebhookUrl'],
     ];
     settingsToWatch.forEach(setting => {
         attachUpdateListener(...setting);
@@ -329,6 +447,52 @@ function setupListeners() {
         }
     });
 
+    // Discord webhook test button
+    $('#idle_discord_test_btn').on('click', async function () {
+        const resultEl = $('#idle_discord_test_result');
+        const context = getContext();
+        const characterName = context.name2 || 'Test Character';
+        const testMessage = '*waves hello from the Idle extension!*';
+
+        resultEl.text('Sending…').css('opacity', '0.7');
+
+        const webhookUrl = extension_settings.idle.discordWebhookUrl?.trim();
+        if (!webhookUrl) {
+            resultEl.text('⚠ No webhook URL set.').css('opacity', '1');
+            return;
+        }
+
+        const payload = {
+            username: characterName,
+            content: `💬 **${characterName}** sent an idle message:`,
+            embeds: [
+                {
+                    description: testMessage,
+                    color: 0x5865F2,
+                    footer: { text: 'SillyTavern • Idle Extension — Test Notification' },
+                    timestamp: new Date().toISOString(),
+                },
+            ],
+        };
+
+        try {
+            const response = await fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (response.ok) {
+                resultEl.text('✓ Test sent!').css('opacity', '1');
+            } else {
+                resultEl.text(`✗ Error ${response.status}`).css('opacity', '1');
+            }
+        } catch (err) {
+            resultEl.text('✗ Network error').css('opacity', '1');
+            console.error('Discord test webhook error:', err);
+        }
+
+        setTimeout(() => resultEl.text('').css('opacity', '0.7'), 4000);
+    });
 }
 
 const debouncedActivityHandler = debounce((event) => {
