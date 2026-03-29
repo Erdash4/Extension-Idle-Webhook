@@ -4,7 +4,7 @@ import {
 } from '../../../../script.js';
 import { debounce } from '../../../utils.js';
 import { promptQuietForLoudResponse, sendMessageAs, sendNarratorMessage } from '../../../slash-commands.js';
-import { extension_settings, getContext, renderExtensionTemplateAsync } from '../../../extensions.js';
+import { extension_settings, getContext } from '../../../extensions.js';
 import { registerSlashCommand } from '../../../slash-commands.js';
 
 const extensionName = 'third-party/Extension-Idle';
@@ -244,66 +244,124 @@ function sendPrompt(prompt) {
 }
 
 /**
- * Load the settings HTML and append to the designated area.
+ * Build and inject the full settings UI directly into the extensions panel.
+ * Replaces the missing dropdown.html template entirely.
  */
-async function loadSettingsHTML() {
-    const settingsHtml = await renderExtensionTemplateAsync(extensionName, 'dropdown');
-    const getContainer = () => $(document.getElementById('idle_container') ?? document.getElementById('extensions_settings2'));
-    const $template = $(settingsHtml);
-    getContainer().append($template);
-    injectDiscordWebhookUI($template);
+function loadSettingsHTML() {
+    const html = `
+<div id="idle_container">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Idle</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+
+            <div class="idle_block flex-container">
+                <label class="checkbox_label flex1" for="idle_enabled">
+                    <input id="idle_enabled" type="checkbox" />
+                    <span>Enabled</span>
+                </label>
+            </div>
+
+            <div class="idle_block flex-container flexFlowColumn">
+                <label for="idle_timer">Idle timer (seconds)</label>
+                <input id="idle_timer" class="text_pole" type="number" min="1" />
+            </div>
+
+            <div class="idle_block flex-container flexFlowColumn">
+                <label class="checkbox_label" for="idle_random_time">
+                    <input id="idle_random_time" type="checkbox" />
+                    <span>Random time</span>
+                </label>
+                <div style="display:none;">
+                    <label for="idle_timer_min">Minimum time (seconds)</label>
+                    <input id="idle_timer_min" class="text_pole" type="number" min="1" />
+                </div>
+            </div>
+
+            <div class="idle_block flex-container flexFlowColumn">
+                <label for="idle_repeats">Max repeats (0 = infinite)</label>
+                <input id="idle_repeats" class="text_pole" type="number" min="0" />
+            </div>
+
+            <div class="idle_block flex-container flexFlowColumn">
+                <label for="idle_prompts">Idle prompts (one per line)</label>
+                <textarea id="idle_prompts" class="text_pole" rows="6"></textarea>
+            </div>
+
+            <div class="idle_block flex-container flexFlowColumn">
+                <span>Response mode (pick one)</span>
+                <label class="checkbox_label" for="idle_use_continuation">
+                    <input id="idle_use_continuation" type="checkbox" />
+                    <span>Continuation</span>
+                </label>
+                <label class="checkbox_label" for="idle_use_regenerate">
+                    <input id="idle_use_regenerate" type="checkbox" />
+                    <span>Regenerate</span>
+                </label>
+                <label class="checkbox_label" for="idle_use_impersonation">
+                    <input id="idle_use_impersonation" type="checkbox" />
+                    <span>Impersonation</span>
+                </label>
+                <label class="checkbox_label" for="idle_use_swipe">
+                    <input id="idle_use_swipe" type="checkbox" />
+                    <span>Swipe</span>
+                </label>
+            </div>
+
+            <div class="idle_block flex-container flexFlowColumn">
+                <label for="idle_sendAs">Send as</label>
+                <select id="idle_sendAs" class="text_pole">
+                    <option value="user">User</option>
+                    <option value="char">Character</option>
+                    <option value="sys">System</option>
+                    <option value="raw">Raw</option>
+                </select>
+            </div>
+
+            <div class="idle_block flex-container">
+                <label class="checkbox_label flex1" for="idle_include_prompt">
+                    <input id="idle_include_prompt" type="checkbox" />
+                    <span>Include prompt in message</span>
+                </label>
+            </div>
+
+            <hr style="margin: 10px 0; opacity: 0.3;" />
+
+            <div class="idle_block flex-container flexFlowColumn">
+                <b>🔔 Discord Webhook Notifications</b>
+
+                <label class="checkbox_label" for="idle_discord_webhook_enabled">
+                    <input id="idle_discord_webhook_enabled" type="checkbox" />
+                    <span>Enable Discord notifications</span>
+                </label>
+
+                <label for="idle_discord_webhook_url">Webhook URL</label>
+                <input
+                    id="idle_discord_webhook_url"
+                    class="text_pole"
+                    type="text"
+                    placeholder="https://discord.com/api/webhooks/..."
+                />
+                <small style="opacity:0.6; font-size:0.8em;">
+                    Discord channel → Edit Channel → Integrations → Webhooks → Copy Webhook URL
+                </small>
+
+                <div style="margin-top:6px; display:flex; align-items:center; gap:8px;">
+                    <input id="idle_discord_test_btn" class="menu_button" type="button" value="Send Test Notification" />
+                    <span id="idle_discord_test_result" style="font-size:0.85em; opacity:0.7;"></span>
+                </div>
+            </div>
+
+        </div><!-- /.inline-drawer-content -->
+    </div><!-- /.inline-drawer -->
+</div><!-- /#idle_container -->`;
+
+    const container = document.getElementById('idle_container') ?? document.getElementById('extensions_settings2');
+    $(container).append(html);
 }
 
-/**
- * Inject Discord webhook settings UI into the settings container.
- * @param {Function|jQuery} container - The container to append into.
- */
-function injectDiscordWebhookUI(container) {
-    const discordHtml = `
-    <div id="idle_discord_section" style="margin-top: 12px; border-top: 1px solid var(--SmartThemeBorderColor, #555); padding-top: 10px;">
-        <h4 style="margin: 0 0 8px 0; font-size: 0.95em; opacity: 0.85;">
-            <span style="margin-right: 6px;">🔔</span> Discord Webhook Notifications
-        </h4>
-
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-            <input type="checkbox" id="idle_discord_webhook_enabled" />
-            <label for="idle_discord_webhook_enabled" style="margin: 0; cursor: pointer;">
-                Enable Discord notifications for idle messages
-            </label>
-        </div>
-
-        <div id="idle_discord_webhook_url_wrapper" style="display: flex; flex-direction: column; gap: 4px;">
-            <label for="idle_discord_webhook_url" style="font-size: 0.85em; opacity: 0.75;">
-                Webhook URL
-            </label>
-            <input
-                type="text"
-                id="idle_discord_webhook_url"
-                placeholder="https://discord.com/api/webhooks/..."
-                style="width: 100%; box-sizing: border-box; padding: 5px 8px; border-radius: 4px;
-                       border: 1px solid var(--SmartThemeBorderColor, #555);
-                       background: var(--SmartThemeBodyColor, #1e1e1e);
-                       color: var(--SmartThemeBlurTintColor, #eee);
-                       font-size: 0.85em;"
-            />
-            <small style="opacity: 0.55; font-size: 0.78em;">
-                In Discord: channel settings → Integrations → Webhooks → Copy Webhook URL
-            </small>
-        </div>
-
-        <div style="margin-top: 8px;">
-            <button id="idle_discord_test_btn"
-                style="padding: 4px 12px; font-size: 0.82em; cursor: pointer; border-radius: 4px;
-                       border: 1px solid var(--SmartThemeBorderColor, #555);
-                       background: transparent; color: inherit; opacity: 0.8;">
-                Send Test Notification
-            </button>
-            <span id="idle_discord_test_result" style="margin-left: 8px; font-size: 0.82em; opacity: 0.7;"></span>
-        </div>
-    </div>`;
-
-    container.append(discordHtml);
-}
 
 /**
  * Update a specific setting based on user input.
@@ -528,8 +586,8 @@ function toggleIdle() {
 
 
 
-jQuery(async () => {
-    await loadSettingsHTML();
+jQuery(() => {
+    loadSettingsHTML();
     loadSettings();
     setupListeners();
     if (extension_settings.idle.enabled) {
