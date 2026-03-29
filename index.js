@@ -38,6 +38,10 @@ let defaultSettings = {
     // Discord webhook settings
     discordWebhookEnabled: false,
     discordWebhookUrl: '',
+    // Reminder macro template
+    reminderPrompt: '[You set a reminder earlier: "{{reminder}}". It was set at {{reminder_time}}. Remind the user now.]',
+    // Persisted reminders array: [{ message, setAt, fireAt }]
+    reminders: [],
 };
 
 
@@ -78,24 +82,29 @@ function populateUIWithSettings() {
     // Discord webhook UI
     $('#idle_discord_webhook_enabled').prop('checked', extension_settings.idle.discordWebhookEnabled).trigger('input');
     $('#idle_discord_webhook_url').val(extension_settings.idle.discordWebhookUrl).trigger('input');
+    // Reminder UI
+    $('#idle_reminder_prompt').val(extension_settings.idle.reminderPrompt).trigger('input');
+    renderRemindersList();
 }
 
 
 /**
  * Reset the idle timer based on the extension settings and context.
+ * Does nothing if a /reply-in is pending.
  */
 function resetIdleTimer() {
+    if (replyInPending) {
+        console.debug('Idle: skipping resetIdleTimer — /reply-in pending');
+        return;
+    }
     console.debug('Resetting idle timer');
     if (idleTimer) clearTimeout(idleTimer);
     let context = getContext();
     if (!context.characterId && !context.groupID) return;
     if (!extension_settings.idle.enabled) return;
     if (extension_settings.idle.randomTime) {
-        // ensure these are ints
-        let min = extension_settings.idle.timerMin;
-        let max = extension_settings.idle.timer;
-        min = parseInt(min);
-        max = parseInt(max);
+        let min = parseInt(extension_settings.idle.timerMin);
+        let max = parseInt(extension_settings.idle.timer);
         let randomTime = (Math.random() * (max - min + 1)) + min;
         idleTimer = setTimeout(sendIdlePrompt, 1000 * randomTime);
     } else {
@@ -103,8 +112,225 @@ function resetIdleTimer() {
     }
 }
 
+// True while a /reply-in timer is pending — suppresses normal idle firing
+let replyInPending = false;
+let reminderHeartbeat = null;
+
+// ─── Duration parsing ────────────────────────────────────────────────────────
+
 /**
- * Send a Discord webhook notification with the character name and message content.
+ * Parse a human-readable duration string into milliseconds.
+ * Supports: "10 minutes", "90 seconds", "2 hours", "1 day",
+ *           compound forms: "2 hours 30 minutes", "1 day 12 hours", etc.
+ * @param {string} str
+ * @returns {number|null} milliseconds, or null if unparseable
+ */
+function parseDuration(str) {
+    const units = {
+        second: 1000, seconds: 1000, sec: 1000, secs: 1000, s: 1000,
+        minute: 60000, minutes: 60000, min: 60000, mins: 60000, m: 60000,
+        hour: 3600000, hours: 3600000, hr: 3600000, hrs: 3600000, h: 3600000,
+        day: 86400000, days: 86400000, d: 86400000,
+    };
+    const re = /(\d+(?:\.\d+)?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)/gi;
+    let total = 0;
+    let matched = false;
+    let m;
+    while ((m = re.exec(str)) !== null) {
+        const val = parseFloat(m[1]);
+        const unit = m[2].toLowerCase();
+        const factor = units[unit];
+        if (factor) { total += val * factor; matched = true; }
+    }
+    return matched ? total : null;
+}
+
+// ─── /reply-in ───────────────────────────────────────────────────────────────
+
+/**
+ * Handle a /reply-in command found in a character message.
+ * Disables normal idle while pending, fires a single sendIdlePrompt after delay.
+ * @param {string} durationStr  e.g. "10 minutes"
+ */
+function handleReplyIn(durationStr) {
+    const ms = parseDuration(durationStr);
+    if (!ms || ms <= 0) {
+        console.warn(`Idle: could not parse /reply-in duration: "${durationStr}"`);
+        return;
+    }
+
+    console.debug(`Idle: /reply-in scheduled in ${ms}ms`);
+    clearTimeout(idleTimer);
+    replyInPending = true;
+
+    idleTimer = setTimeout(async () => {
+        replyInPending = false;
+        repeatCount = 0; // treat as fresh interaction
+        await sendIdlePrompt();
+    }, ms);
+}
+
+// ─── /set-self-reminder ──────────────────────────────────────────────────────
+
+/**
+ * Parse a date + time string into a timestamp.
+ * Accepts "M/D/YYYY" or "YYYY-MM-DD" dates and "H:MMam/pm" or "HH:MM" times.
+ * @param {string} dateStr
+ * @param {string} timeStr
+ * @returns {number|null} unix timestamp ms, or null on failure
+ */
+function parseReminderDateTime(dateStr, timeStr) {
+    try {
+        // Normalise date separators
+        const normDate = dateStr.trim().replace(/-/g, '/');
+        const combined = `${normDate} ${timeStr.trim()}`;
+        const ts = Date.parse(combined);
+        if (!isNaN(ts)) return ts;
+
+        // Fallback: try just the date part (midnight)
+        const tsDate = Date.parse(normDate);
+        return isNaN(tsDate) ? null : tsDate;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Store a new reminder in settings.
+ * @param {string} message
+ * @param {string} dateStr
+ * @param {string} timeStr
+ */
+function handleSetSelfReminder(message, dateStr, timeStr) {
+    const fireAt = parseReminderDateTime(dateStr, timeStr);
+    if (!fireAt) {
+        console.warn(`Idle: could not parse reminder date/time: "${dateStr}" "${timeStr}"`);
+        return;
+    }
+
+    const reminder = {
+        message,
+        setAt: new Date().toLocaleString(),
+        fireAt,
+    };
+
+    if (!Array.isArray(extension_settings.idle.reminders)) {
+        extension_settings.idle.reminders = [];
+    }
+    extension_settings.idle.reminders.push(reminder);
+    saveSettingsDebounced();
+    renderRemindersList();
+    console.debug(`Idle: reminder set for ${new Date(fireAt).toLocaleString()} — "${message}"`);
+}
+
+/**
+ * Fire a due reminder as a user prompt using the configured reminderPrompt template.
+ * @param {{ message: string, setAt: string, fireAt: number }} reminder
+ */
+function fireReminder(reminder) {
+    const template = extension_settings.idle.reminderPrompt ||
+        '[You set a reminder earlier: "{{reminder}}". It was set at {{reminder_time}}. Remind the user now.]';
+
+    const prompt = template
+        .replace(/{{reminder}}/g, reminder.message)
+        .replace(/{{reminder_time}}/g, reminder.setAt);
+
+    console.debug(`Idle: firing reminder — "${reminder.message}"`);
+    sendPrompt(prompt);
+}
+
+/**
+ * Check all pending reminders and fire any that are due.
+ * Called on a 30-second heartbeat.
+ */
+function checkReminders() {
+    if (!Array.isArray(extension_settings.idle.reminders)) return;
+
+    const now = Date.now();
+    const pending = [];
+    let changed = false;
+
+    for (const r of extension_settings.idle.reminders) {
+        if (r.fireAt <= now) {
+            fireReminder(r);
+            changed = true;
+        } else {
+            pending.push(r);
+        }
+    }
+
+    if (changed) {
+        extension_settings.idle.reminders = pending;
+        saveSettingsDebounced();
+        renderRemindersList();
+    }
+}
+
+/**
+ * Start the 30-second reminder heartbeat. Safe to call multiple times.
+ */
+function startReminderHeartbeat() {
+    if (reminderHeartbeat) return;
+    reminderHeartbeat = setInterval(checkReminders, 30000);
+    // Also check immediately in case reminders fired while ST was closed
+    checkReminders();
+}
+
+/**
+ * Refresh the pending reminders list shown in the settings UI.
+ */
+function renderRemindersList() {
+    const $list = $('#idle_reminders_list');
+    if (!$list.length) return;
+    const reminders = extension_settings.idle.reminders || [];
+    if (!reminders.length) {
+        $list.html('<em style="opacity:0.5;">No pending reminders.</em>');
+        return;
+    }
+    const items = reminders.map((r, i) => {
+        const when = new Date(r.fireAt).toLocaleString();
+        return `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
+            <span>⏰ <b>${when}</b> — ${r.message}</span>
+            <button class="idle_delete_reminder menu_button" data-index="${i}" style="padding:1px 7px; font-size:0.8em;">✕</button>
+        </div>`;
+    }).join('');
+    $list.html(items);
+
+    $list.find('.idle_delete_reminder').on('click', function () {
+        const idx = parseInt($(this).data('index'));
+        extension_settings.idle.reminders.splice(idx, 1);
+        saveSettingsDebounced();
+        renderRemindersList();
+    });
+}
+
+/**
+ * Scan a character message for known commands and dispatch them.
+ * Commands are matched anywhere in the text.
+ *
+ * Supported:
+ *   /reply-in "duration"
+ *   /set-self-reminder "message" "date" "time"
+ *
+ * @param {string} text  Raw text of the character's message.
+ */
+function processCharacterCommands(text) {
+    // /reply-in "10 minutes"
+    const replyInRe = /\/reply-in\s+"([^"]+)"/i;
+    const replyInMatch = text.match(replyInRe);
+    if (replyInMatch) {
+        handleReplyIn(replyInMatch[1]);
+    }
+
+    // /set-self-reminder "message" "date" "time"
+    const reminderRe = /\/set-self-reminder\s+"([^"]+)"\s+"([^"]+)"\s+"([^"]+)"/i;
+    const reminderMatch = text.match(reminderRe);
+    if (reminderMatch) {
+        handleSetSelfReminder(reminderMatch[1], reminderMatch[2], reminderMatch[3]);
+    }
+}
+
+
  * @param {string} characterName - The name of the character sending the message.
  * @param {string} messageContent - The content of the idle message.
  */
@@ -211,9 +437,10 @@ async function sendIdlePrompt() {
     repeatCount++;
     resetIdleTimer();
 
-    // Wait for the AI to finish, then send the actual response text to Discord
+    // Wait for the AI to finish, then process commands and send Discord webhook
     const responseText = await waitForCharacterResponse();
     if (responseText) {
+        processCharacterCommands(responseText);
         await sendDiscordWebhook(characterName, responseText);
     }
 }
@@ -334,6 +561,27 @@ function loadSettingsHTML() {
             <hr style="margin: 10px 0; opacity: 0.3;" />
 
             <div class="idle_block flex-container flexFlowColumn">
+                <b>⏰ Character Commands</b>
+                <small style="opacity:0.6; font-size:0.8em; margin-bottom:4px;">
+                    Characters can use <code>/reply-in "10 minutes"</code> and
+                    <code>/set-self-reminder "message" "date" "time"</code> in their responses.
+                </small>
+
+                <label for="idle_reminder_prompt">Reminder prompt template</label>
+                <textarea id="idle_reminder_prompt" class="text_pole" rows="3"></textarea>
+                <small style="opacity:0.6; font-size:0.8em;">
+                    Use <code>{{reminder}}</code> and <code>{{reminder_time}}</code> as placeholders.
+                </small>
+
+                <div style="margin-top:8px;">
+                    <b style="font-size:0.9em;">Pending reminders</b>
+                    <div id="idle_reminders_list" style="margin-top:4px; font-size:0.85em; opacity:0.8;"></div>
+                </div>
+            </div>
+
+            <hr style="margin: 10px 0; opacity: 0.3;" />
+
+            <div class="idle_block flex-container flexFlowColumn">
                 <b>🔔 Discord Webhook Notifications</b>
 
                 <label class="checkbox_label" for="idle_discord_webhook_enabled">
@@ -433,6 +681,8 @@ function setupListeners() {
         // Discord webhook settings
         ['idle_discord_webhook_enabled', 'discordWebhookEnabled', true],
         ['idle_discord_webhook_url', 'discordWebhookUrl'],
+        // Reminder settings
+        ['idle_reminder_prompt', 'reminderPrompt'],
     ];
     settingsToWatch.forEach(setting => {
         attachUpdateListener(...setting);
@@ -586,6 +836,7 @@ jQuery(() => {
     loadSettingsHTML();
     loadSettings();
     setupListeners();
+    startReminderHeartbeat();
     if (extension_settings.idle.enabled) {
         resetIdleTimer();
     }
